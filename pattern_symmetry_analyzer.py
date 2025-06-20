@@ -176,16 +176,16 @@ class PatternSymmetryAnalyzer:
                 
                 ring_asymmetries.append(is_asymmetric)
                 detailed_analysis.append({
-                    'radius': radius,
-                    'mean_intensity': mean_intensity,
-                    'std_intensity': std_intensity,
-                    'coefficient_of_variation': cv,
-                    'range_ratio': range_ratio,
-                    'iqr_ratio': iqr_ratio,
-                    'combined_metric': combined_metric,
-                    'adaptive_threshold': adaptive_threshold,
-                    'is_asymmetric': is_asymmetric,
-                    'intensities': smoothed_intensities.tolist()
+                    'radius': float(radius),
+                    'mean_intensity': float(mean_intensity),
+                    'std_intensity': float(std_intensity),
+                    'coefficient_of_variation': float(cv),
+                    'range_ratio': float(range_ratio),
+                    'iqr_ratio': float(iqr_ratio),
+                    'combined_metric': float(combined_metric),
+                    'adaptive_threshold': float(adaptive_threshold),
+                    'is_asymmetric': bool(is_asymmetric),
+                    'intensities': [float(x) for x in smoothed_intensities]
                 })
         
         # Overall assessment with additional criteria
@@ -205,7 +205,7 @@ class PatternSymmetryAnalyzer:
                 consecutive_asymmetric = 0
         
         is_pattern_symmetric = not (
-            (asymmetric_rings / total_rings > 0.2) or 
+            (asymmetric_rings / total_rings > 0.2) if total_rings > 0 else False or 
             (max_consecutive >= 3)
         )
         
@@ -315,23 +315,29 @@ Legend:
             base_name = os.path.basename(self.current_image_path).split('.')[0]
             output_path = f"results_{base_name}.json"
         
-        # Convert numpy arrays to lists for JSON serialization
-        results_copy = analysis_results.copy()
-        for ring_data in results_copy['detailed_analysis']:
-            ring_data['intensities'] = [float(x) for x in ring_data['intensities']]
-            # Convert numpy types to native Python types
-            ring_data['radius'] = float(ring_data['radius'])
-            ring_data['mean_intensity'] = float(ring_data['mean_intensity'])
-            ring_data['std_intensity'] = float(ring_data['std_intensity'])
-            ring_data['coefficient_of_variation'] = float(ring_data['coefficient_of_variation'])
-            ring_data['range_ratio'] = float(ring_data['range_ratio'])
-            ring_data['iqr_ratio'] = float(ring_data['iqr_ratio'])
-            ring_data['combined_metric'] = float(ring_data['combined_metric'])
-            ring_data['adaptive_threshold'] = float(ring_data['adaptive_threshold'])
-            ring_data['is_asymmetric'] = bool(ring_data['is_asymmetric'])
+        # The results should already have all numpy types converted
+        # Double-check and convert any remaining numpy types
+        def convert_numpy_types(obj):
+            if isinstance(obj, np.ndarray):
+                return obj.tolist()
+            elif isinstance(obj, (np.integer, np.int_)):
+                return int(obj)
+            elif isinstance(obj, (np.floating, np.float_)):
+                return float(obj)
+            elif isinstance(obj, (np.bool_, bool)):
+                return bool(obj)
+            elif isinstance(obj, dict):
+                return {key: convert_numpy_types(val) for key, val in obj.items()}
+            elif isinstance(obj, list):
+                return [convert_numpy_types(item) for item in obj]
+            else:
+                return obj
+        
+        # Convert all numpy types recursively
+        results_to_save = convert_numpy_types(analysis_results)
         
         with open(output_path, 'w') as f:
-            json.dump(results_copy, f, indent=2)
+            json.dump(results_to_save, f, indent=2)
         
         print(f"Results saved to: {output_path}")
     
@@ -357,55 +363,18 @@ Legend:
         return results
 
 
-def batch_analyze_directory(directory_path: str = ".", 
-                           threshold_percentage: float = 15.0):
-    """Analyze all images in a directory"""
-    analyzer = PatternSymmetryAnalyzer(threshold_percentage=threshold_percentage)
-    
-    # Find all image files
-    image_extensions = ['.png', '.jpg', '.jpeg', '.bmp', '.tiff']
-    image_files = []
-    
-    for file in os.listdir(directory_path):
-        if any(file.lower().endswith(ext) for ext in image_extensions):
-            # Skip analysis output files
-            if not file.startswith('analysis_'):
-                image_files.append(os.path.join(directory_path, file))
-    
-    print(f"Found {len(image_files)} images to analyze")
-    
-    results_summary = []
-    
-    for image_path in image_files:
-        try:
-            results = analyzer.analyze_image(image_path)
-            results_summary.append({
-                'image': os.path.basename(image_path),
-                'is_symmetric': results['is_symmetric'],
-                'asymmetry_percentage': results['asymmetry_percentage']
-            })
-        except Exception as e:
-            print(f"Error analyzing {image_path}: {str(e)}")
-    
-    # Print summary
-    print("\n" + "="*50)
-    print("BATCH ANALYSIS SUMMARY")
-    print("="*50)
-    
-    for result in results_summary:
-        status = "SYMMETRIC" if result['is_symmetric'] else "ASYMMETRIC"
-        print(f"{result['image']}: {status} ({result['asymmetry_percentage']:.1f}% asymmetry)")
-    
-    return results_summary
-
-
+# Simple usage example
 if __name__ == "__main__":
-    # Example usage
+    import sys
+    
     print("Pattern Symmetry Analyzer")
     print("========================")
-    print("\nThis tool analyzes radial symmetry in patterns.")
-    print("You will be asked to click on the center of each pattern.")
-    print("\nStarting batch analysis of current directory...")
+    print("\nUsage: python pattern_symmetry_analyzer.py <image_file>")
+    print("Or use analyze_single.py for more options")
     
-    # Analyze all images in current directory with updated threshold
-    batch_analyze_directory(".", threshold_percentage=15.0) 
+    if len(sys.argv) > 1:
+        analyzer = PatternSymmetryAnalyzer()
+        analyzer.analyze_image(sys.argv[1])
+    else:
+        print("\nNo image file specified. Use:")
+        print("  python analyze_single.py <image_file>") 
