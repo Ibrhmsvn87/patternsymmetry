@@ -6,9 +6,10 @@ from matplotlib.widgets import Button
 import os
 from typing import Tuple, List, Dict
 import json
+from scipy import signal
 
 class PatternSymmetryAnalyzer:
-    def __init__(self, threshold_percentage: float = 10.0):
+    def __init__(self, threshold_percentage: float = 15.0):
         """
         Initialize the Pattern Symmetry Analyzer
         
@@ -96,6 +97,9 @@ class PatternSymmetryAnalyzer:
         height, width = self.gray_image.shape
         cx, cy = center
         
+        # Apply slight Gaussian blur to reduce noise
+        smoothed_image = cv2.GaussianBlur(self.gray_image, (5, 5), 1.0)
+        
         # Determine maximum radius
         max_radius = min(cx, cy, width - cx, height - cy)
         radii = np.linspace(10, max_radius * 0.9, num_radii)
@@ -118,25 +122,57 @@ class PatternSymmetryAnalyzer:
                 # Ensure coordinates are within image bounds
                 if 0 <= x < width and 0 <= y < height:
                     # Sample a small region around the point for robustness
-                    x_min = max(0, x - 1)
-                    x_max = min(width, x + 2)
-                    y_min = max(0, y - 1)
-                    y_max = min(height, y + 2)
+                    x_min = max(0, x - 2)
+                    x_max = min(width, x + 3)
+                    y_min = max(0, y - 2)
+                    y_max = min(height, y + 3)
                     
-                    region = self.gray_image[y_min:y_max, x_min:x_max]
+                    region = smoothed_image[y_min:y_max, x_min:x_max]
                     if region.size > 0:
                         intensities.append(np.mean(region))
             
-            if len(intensities) > 0:
-                # Calculate statistics for this ring
-                mean_intensity = np.mean(intensities)
-                std_intensity = np.std(intensities)
+            if len(intensities) > num_angles * 0.8:  # Need at least 80% of points
+                # Smooth the intensity profile to reduce noise impact
+                intensities_array = np.array(intensities)
                 
-                # Calculate coefficient of variation (CV) as a measure of asymmetry
+                # Apply circular smoothing
+                window_size = 3
+                smoothed_intensities = signal.convolve(
+                    np.pad(intensities_array, window_size, mode='wrap'),
+                    np.ones(window_size) / window_size,
+                    mode='valid'
+                )[window_size:-window_size]
+                
+                # Calculate statistics on smoothed data
+                mean_intensity = np.mean(smoothed_intensities)
+                std_intensity = np.std(smoothed_intensities)
+                
+                # Calculate multiple metrics for robustness
                 cv = (std_intensity / mean_intensity * 100) if mean_intensity > 0 else 0
                 
+                # Calculate range-based metric (more robust to outliers)
+                intensity_range = np.max(smoothed_intensities) - np.min(smoothed_intensities)
+                range_ratio = (intensity_range / mean_intensity * 100) if mean_intensity > 0 else 0
+                
+                # Use percentile-based metric for additional robustness
+                p25 = np.percentile(smoothed_intensities, 25)
+                p75 = np.percentile(smoothed_intensities, 75)
+                iqr_ratio = ((p75 - p25) / mean_intensity * 100) if mean_intensity > 0 else 0
+                
+                # Combine metrics with weights
+                # CV is sensitive to small variations, range_ratio to large deviations
+                combined_metric = 0.4 * cv + 0.4 * range_ratio + 0.2 * iqr_ratio
+                
+                # Adaptive threshold based on mean intensity
+                # Darker regions may have more relative noise
+                adaptive_threshold = self.threshold_percentage
+                if mean_intensity < 50:  # Dark regions
+                    adaptive_threshold *= 1.5
+                elif mean_intensity > 200:  # Very bright regions
+                    adaptive_threshold *= 0.8
+                
                 # Check if variation exceeds threshold
-                is_asymmetric = cv > self.threshold_percentage
+                is_asymmetric = combined_metric > adaptive_threshold
                 
                 ring_asymmetries.append(is_asymmetric)
                 detailed_analysis.append({
@@ -144,25 +180,44 @@ class PatternSymmetryAnalyzer:
                     'mean_intensity': mean_intensity,
                     'std_intensity': std_intensity,
                     'coefficient_of_variation': cv,
+                    'range_ratio': range_ratio,
+                    'iqr_ratio': iqr_ratio,
+                    'combined_metric': combined_metric,
+                    'adaptive_threshold': adaptive_threshold,
                     'is_asymmetric': is_asymmetric,
-                    'intensities': intensities
+                    'intensities': smoothed_intensities.tolist()
                 })
         
-        # Overall assessment
+        # Overall assessment with additional criteria
         asymmetric_rings = sum(ring_asymmetries)
         total_rings = len(ring_asymmetries)
         
-        # Pattern is asymmetric if ANY ring shows asymmetry
-        is_pattern_symmetric = asymmetric_rings == 0
+        # Pattern is asymmetric if:
+        # 1. More than 20% of rings are asymmetric, OR
+        # 2. Any 3 consecutive rings are asymmetric (indicates localized asymmetry)
+        consecutive_asymmetric = 0
+        max_consecutive = 0
+        for is_asym in ring_asymmetries:
+            if is_asym:
+                consecutive_asymmetric += 1
+                max_consecutive = max(max_consecutive, consecutive_asymmetric)
+            else:
+                consecutive_asymmetric = 0
+        
+        is_pattern_symmetric = not (
+            (asymmetric_rings / total_rings > 0.2) or 
+            (max_consecutive >= 3)
+        )
         
         return {
-            'is_symmetric': is_pattern_symmetric,
-            'asymmetric_rings': asymmetric_rings,
-            'total_rings': total_rings,
-            'asymmetry_percentage': (asymmetric_rings / total_rings * 100) if total_rings > 0 else 0,
+            'is_symmetric': bool(is_pattern_symmetric),
+            'asymmetric_rings': int(asymmetric_rings),
+            'total_rings': int(total_rings),
+            'asymmetry_percentage': float((asymmetric_rings / total_rings * 100) if total_rings > 0 else 0),
+            'max_consecutive_asymmetric': int(max_consecutive),
             'detailed_analysis': detailed_analysis,
             'center': center,
-            'threshold_percentage': self.threshold_percentage
+            'threshold_percentage': float(self.threshold_percentage)
         }
     
     def visualize_analysis(self, analysis_results: Dict):
@@ -192,17 +247,17 @@ class PatternSymmetryAnalyzer:
         ax2.set_title("Grayscale Intensity")
         ax2.plot(cx, cy, 'r+', markersize=15, markeredgewidth=3)
         
-        # 3. Coefficient of Variation by radius
+        # 3. Combined metric by radius
         ax3 = axes[1, 0]
         radii = [r['radius'] for r in analysis_results['detailed_analysis']]
-        cvs = [r['coefficient_of_variation'] for r in analysis_results['detailed_analysis']]
+        combined_metrics = [r['combined_metric'] for r in analysis_results['detailed_analysis']]
+        adaptive_thresholds = [r['adaptive_threshold'] for r in analysis_results['detailed_analysis']]
         
-        ax3.plot(radii, cvs, 'b-', linewidth=2)
-        ax3.axhline(y=self.threshold_percentage, color='r', linestyle='--', 
-                   label=f'Threshold ({self.threshold_percentage}%)')
+        ax3.plot(radii, combined_metrics, 'b-', linewidth=2, label='Combined Metric')
+        ax3.plot(radii, adaptive_thresholds, 'r--', linewidth=2, label='Adaptive Threshold')
         ax3.set_xlabel('Radius (pixels)')
-        ax3.set_ylabel('Coefficient of Variation (%)')
-        ax3.set_title('Intensity Variation by Radius')
+        ax3.set_ylabel('Asymmetry Metric (%)')
+        ax3.set_title('Asymmetry Analysis by Radius')
         ax3.legend()
         ax3.grid(True, alpha=0.3)
         
@@ -221,10 +276,17 @@ Overall Assessment: {'SYMMETRIC' if analysis_results['is_symmetric'] else 'ASYMM
 
 Asymmetric Rings: {analysis_results['asymmetric_rings']} / {analysis_results['total_rings']}
 Asymmetry Rate: {analysis_results['asymmetry_percentage']:.1f}%
+Max Consecutive Asymmetric: {analysis_results['max_consecutive_asymmetric']}
 
-Threshold: {self.threshold_percentage}% intensity variation
+Base Threshold: {self.threshold_percentage}%
 
 {'='*30}
+
+Analysis Criteria:
+- Ring is asymmetric if combined metric > adaptive threshold
+- Pattern is asymmetric if:
+  • >20% of rings are asymmetric OR
+  • 3+ consecutive rings are asymmetric
 
 Legend:
 - Green circles: Symmetric regions
@@ -232,7 +294,7 @@ Legend:
 - Red cross: Selected center point
         """
         
-        ax4.text(0.1, 0.5, summary_text, fontsize=12, family='monospace',
+        ax4.text(0.1, 0.5, summary_text, fontsize=11, family='monospace',
                 verticalalignment='center', transform=ax4.transAxes)
         
         plt.tight_layout()
@@ -257,6 +319,16 @@ Legend:
         results_copy = analysis_results.copy()
         for ring_data in results_copy['detailed_analysis']:
             ring_data['intensities'] = [float(x) for x in ring_data['intensities']]
+            # Convert numpy types to native Python types
+            ring_data['radius'] = float(ring_data['radius'])
+            ring_data['mean_intensity'] = float(ring_data['mean_intensity'])
+            ring_data['std_intensity'] = float(ring_data['std_intensity'])
+            ring_data['coefficient_of_variation'] = float(ring_data['coefficient_of_variation'])
+            ring_data['range_ratio'] = float(ring_data['range_ratio'])
+            ring_data['iqr_ratio'] = float(ring_data['iqr_ratio'])
+            ring_data['combined_metric'] = float(ring_data['combined_metric'])
+            ring_data['adaptive_threshold'] = float(ring_data['adaptive_threshold'])
+            ring_data['is_asymmetric'] = bool(ring_data['is_asymmetric'])
         
         with open(output_path, 'w') as f:
             json.dump(results_copy, f, indent=2)
@@ -286,7 +358,7 @@ Legend:
 
 
 def batch_analyze_directory(directory_path: str = ".", 
-                           threshold_percentage: float = 10.0):
+                           threshold_percentage: float = 15.0):
     """Analyze all images in a directory"""
     analyzer = PatternSymmetryAnalyzer(threshold_percentage=threshold_percentage)
     
@@ -335,5 +407,5 @@ if __name__ == "__main__":
     print("You will be asked to click on the center of each pattern.")
     print("\nStarting batch analysis of current directory...")
     
-    # Analyze all images in current directory
-    batch_analyze_directory(".", threshold_percentage=10.0) 
+    # Analyze all images in current directory with updated threshold
+    batch_analyze_directory(".", threshold_percentage=15.0) 
