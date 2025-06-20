@@ -7,21 +7,25 @@ import os
 from typing import Tuple, List, Dict
 import json
 from scipy import signal
+from scipy.ndimage import median_filter
 
 class PatternSymmetryAnalyzer:
-    def __init__(self, threshold_percentage: float = 15.0):
+    def __init__(self, threshold_percentage: float = 15.0, smoothing_level: str = 'medium'):
         """
         Initialize the Pattern Symmetry Analyzer
         
         Args:
             threshold_percentage: Percentage threshold for intensity variation
                                 to consider regions as symmetric
+            smoothing_level: Level of smoothing to apply ('light', 'medium', 'heavy')
         """
         self.threshold_percentage = threshold_percentage
+        self.smoothing_level = smoothing_level
         self.center = None
         self.current_image = None
         self.current_image_path = None
         self.gray_image = None
+        self.preprocessed_image = None
         
     def load_image(self, image_path: str) -> np.ndarray:
         """Load and return image in RGB format"""
@@ -37,7 +41,53 @@ class PatternSymmetryAnalyzer:
         # Convert to grayscale for analysis
         self.gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         
+        # Apply preprocessing
+        self.preprocessed_image = self.preprocess_image(self.gray_image)
+        
         return image_rgb
+    
+    def preprocess_image(self, image: np.ndarray) -> np.ndarray:
+        """
+        Apply sophisticated preprocessing to remove spikes and smooth the image
+        
+        Args:
+            image: Grayscale image
+            
+        Returns:
+            Preprocessed image
+        """
+        processed = image.copy()
+        
+        # Step 1: Median filter to remove salt-and-pepper noise and spikes
+        if self.smoothing_level in ['medium', 'heavy']:
+            kernel_size = 5 if self.smoothing_level == 'medium' else 7
+            processed = median_filter(processed, size=kernel_size)
+            print(f"Applied median filter (kernel size: {kernel_size}) to remove spikes")
+        
+        # Step 2: Bilateral filter for edge-preserving smoothing
+        # This maintains edges while smoothing uniform areas
+        if self.smoothing_level == 'light':
+            processed = cv2.bilateralFilter(processed, d=5, sigmaColor=50, sigmaSpace=50)
+        elif self.smoothing_level == 'medium':
+            processed = cv2.bilateralFilter(processed, d=9, sigmaColor=75, sigmaSpace=75)
+        elif self.smoothing_level == 'heavy':
+            processed = cv2.bilateralFilter(processed, d=13, sigmaColor=100, sigmaSpace=100)
+        print(f"Applied bilateral filter ({self.smoothing_level} smoothing)")
+        
+        # Step 3: Gaussian blur for final smoothing
+        if self.smoothing_level == 'medium':
+            processed = cv2.GaussianBlur(processed, (5, 5), 1.0)
+        elif self.smoothing_level == 'heavy':
+            processed = cv2.GaussianBlur(processed, (7, 7), 1.5)
+        
+        # Optional Step 4: Morphological operations for very noisy images
+        if self.smoothing_level == 'heavy':
+            # Opening (erosion followed by dilation) to remove small noise
+            kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+            processed = cv2.morphologyEx(processed, cv2.MORPH_OPEN, kernel)
+            print("Applied morphological opening to remove small noise regions")
+        
+        return processed
     
     def select_center(self, image: np.ndarray) -> Tuple[int, int]:
         """
@@ -46,23 +96,30 @@ class PatternSymmetryAnalyzer:
         """
         self.center = None
         
-        fig, ax = plt.subplots(figsize=(10, 8))
-        ax.imshow(image)
-        ax.set_title("Click to select the center of the pattern")
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(15, 7))
+        
+        # Show original image
+        ax1.imshow(image)
+        ax1.set_title("Click to select the center of the pattern")
+        
+        # Show preprocessed grayscale image
+        ax2.imshow(self.preprocessed_image, cmap='gray')
+        ax2.set_title(f"Preprocessed image ({self.smoothing_level} smoothing)")
         
         def onclick(event):
-            if event.inaxes == ax:
+            if event.inaxes == ax1:
                 self.center = (int(event.xdata), int(event.ydata))
-                # Draw a marker at the selected point
-                ax.plot(event.xdata, event.ydata, 'r+', markersize=15, markeredgewidth=3)
-                ax.set_title(f"Center selected at ({self.center[0]}, {self.center[1]})")
+                # Draw a marker at the selected point on both images
+                ax1.plot(event.xdata, event.ydata, 'r+', markersize=15, markeredgewidth=3)
+                ax2.plot(event.xdata, event.ydata, 'r+', markersize=15, markeredgewidth=3)
+                ax1.set_title(f"Center selected at ({self.center[0]}, {self.center[1]})")
                 plt.draw()
         
         # Connect the click event
         cid = fig.canvas.mpl_connect('button_press_event', onclick)
         
         # Add a continue button
-        ax_button = plt.axes([0.7, 0.05, 0.15, 0.04])
+        ax_button = plt.axes([0.7, 0.02, 0.15, 0.04])
         btn_continue = Button(ax_button, 'Analyze')
         
         def on_continue(event):
@@ -70,6 +127,7 @@ class PatternSymmetryAnalyzer:
         
         btn_continue.on_clicked(on_continue)
         
+        plt.tight_layout()
         plt.show()
         
         if self.center is None:
@@ -91,14 +149,14 @@ class PatternSymmetryAnalyzer:
         Returns:
             Dictionary containing symmetry analysis results
         """
-        if self.gray_image is None:
+        if self.preprocessed_image is None:
             raise ValueError("No image loaded")
         
-        height, width = self.gray_image.shape
+        height, width = self.preprocessed_image.shape
         cx, cy = center
         
-        # Apply slight Gaussian blur to reduce noise
-        smoothed_image = cv2.GaussianBlur(self.gray_image, (5, 5), 1.0)
+        # Use the preprocessed image for analysis
+        analysis_image = self.preprocessed_image
         
         # Determine maximum radius
         max_radius = min(cx, cy, width - cx, height - cy)
@@ -127,7 +185,7 @@ class PatternSymmetryAnalyzer:
                     y_min = max(0, y - 2)
                     y_max = min(height, y + 3)
                     
-                    region = smoothed_image[y_min:y_max, x_min:x_max]
+                    region = analysis_image[y_min:y_max, x_min:x_max]
                     if region.size > 0:
                         intensities.append(np.mean(region))
             
@@ -135,8 +193,8 @@ class PatternSymmetryAnalyzer:
                 # Smooth the intensity profile to reduce noise impact
                 intensities_array = np.array(intensities)
                 
-                # Apply circular smoothing
-                window_size = 3
+                # Apply circular smoothing with adaptive window size
+                window_size = 3 if self.smoothing_level == 'light' else 5
                 smoothed_intensities = signal.convolve(
                     np.pad(intensities_array, window_size, mode='wrap'),
                     np.ones(window_size) / window_size,
@@ -170,6 +228,11 @@ class PatternSymmetryAnalyzer:
                     adaptive_threshold *= 1.5
                 elif mean_intensity > 200:  # Very bright regions
                     adaptive_threshold *= 0.8
+                
+                # Additional adjustment based on smoothing level
+                if self.smoothing_level == 'heavy':
+                    # With heavy smoothing, we can be slightly stricter
+                    adaptive_threshold *= 0.9
                 
                 # Check if variation exceeds threshold
                 is_asymmetric = combined_metric > adaptive_threshold
@@ -217,12 +280,13 @@ class PatternSymmetryAnalyzer:
             'max_consecutive_asymmetric': int(max_consecutive),
             'detailed_analysis': detailed_analysis,
             'center': center,
-            'threshold_percentage': float(self.threshold_percentage)
+            'threshold_percentage': float(self.threshold_percentage),
+            'smoothing_level': self.smoothing_level
         }
     
     def visualize_analysis(self, analysis_results: Dict):
         """Create comprehensive visualization of the symmetry analysis"""
-        fig, axes = plt.subplots(2, 2, figsize=(15, 15))
+        fig, axes = plt.subplots(2, 3, figsize=(18, 12))
         
         # 1. Original image with center and rings
         ax1 = axes[0, 0]
@@ -241,33 +305,46 @@ class PatternSymmetryAnalyzer:
                           edgecolor=color, linewidth=2, alpha=0.6)
             ax1.add_patch(circle)
         
-        # 2. Grayscale intensity image
+        # 2. Original grayscale
         ax2 = axes[0, 1]
         ax2.imshow(self.gray_image, cmap='gray')
-        ax2.set_title("Grayscale Intensity")
+        ax2.set_title("Original Grayscale")
         ax2.plot(cx, cy, 'r+', markersize=15, markeredgewidth=3)
         
-        # 3. Combined metric by radius
-        ax3 = axes[1, 0]
+        # 3. Preprocessed image
+        ax3 = axes[0, 2]
+        ax3.imshow(self.preprocessed_image, cmap='gray')
+        ax3.set_title(f"Preprocessed ({self.smoothing_level} smoothing)")
+        ax3.plot(cx, cy, 'r+', markersize=15, markeredgewidth=3)
+        
+        # 4. Combined metric by radius
+        ax4 = axes[1, 0]
         radii = [r['radius'] for r in analysis_results['detailed_analysis']]
         combined_metrics = [r['combined_metric'] for r in analysis_results['detailed_analysis']]
         adaptive_thresholds = [r['adaptive_threshold'] for r in analysis_results['detailed_analysis']]
         
-        ax3.plot(radii, combined_metrics, 'b-', linewidth=2, label='Combined Metric')
-        ax3.plot(radii, adaptive_thresholds, 'r--', linewidth=2, label='Adaptive Threshold')
-        ax3.set_xlabel('Radius (pixels)')
-        ax3.set_ylabel('Asymmetry Metric (%)')
-        ax3.set_title('Asymmetry Analysis by Radius')
-        ax3.legend()
-        ax3.grid(True, alpha=0.3)
+        ax4.plot(radii, combined_metrics, 'b-', linewidth=2, label='Combined Metric')
+        ax4.plot(radii, adaptive_thresholds, 'r--', linewidth=2, label='Adaptive Threshold')
+        ax4.set_xlabel('Radius (pixels)')
+        ax4.set_ylabel('Asymmetry Metric (%)')
+        ax4.set_title('Asymmetry Analysis by Radius')
+        ax4.legend()
+        ax4.grid(True, alpha=0.3)
         
-        # 4. Summary text
-        ax4 = axes[1, 1]
-        ax4.axis('off')
+        # 5. Difference image (showing preprocessing effect)
+        ax5 = axes[1, 1]
+        diff_image = np.abs(self.gray_image.astype(float) - self.preprocessed_image.astype(float))
+        im = ax5.imshow(diff_image, cmap='hot')
+        ax5.set_title("Preprocessing Effect (removed noise/spikes)")
+        plt.colorbar(im, ax=ax5)
+        
+        # 6. Summary text
+        ax6 = axes[1, 2]
+        ax6.axis('off')
         
         summary_text = f"""
 SYMMETRY ANALYSIS RESULTS
-{'='*30}
+{'='*35}
 
 Image: {os.path.basename(self.current_image_path)}
 Center: ({cx}, {cy})
@@ -276,26 +353,27 @@ Overall Assessment: {'SYMMETRIC' if analysis_results['is_symmetric'] else 'ASYMM
 
 Asymmetric Rings: {analysis_results['asymmetric_rings']} / {analysis_results['total_rings']}
 Asymmetry Rate: {analysis_results['asymmetry_percentage']:.1f}%
-Max Consecutive Asymmetric: {analysis_results['max_consecutive_asymmetric']}
+Max Consecutive: {analysis_results['max_consecutive_asymmetric']}
 
-Base Threshold: {self.threshold_percentage}%
+Settings:
+- Base Threshold: {self.threshold_percentage}%
+- Smoothing: {self.smoothing_level}
 
-{'='*30}
+{'='*35}
 
 Analysis Criteria:
-- Ring is asymmetric if combined metric > adaptive threshold
-- Pattern is asymmetric if:
-  • >20% of rings are asymmetric OR
-  • 3+ consecutive rings are asymmetric
+- Ring asymmetric if metric > threshold
+- Pattern asymmetric if:
+  • >20% rings asymmetric OR
+  • 3+ consecutive rings asymmetric
 
 Legend:
 - Green circles: Symmetric regions
 - Red circles: Asymmetric regions
-- Red cross: Selected center point
         """
         
-        ax4.text(0.1, 0.5, summary_text, fontsize=11, family='monospace',
-                verticalalignment='center', transform=ax4.transAxes)
+        ax6.text(0.05, 0.5, summary_text, fontsize=10, family='monospace',
+                verticalalignment='center', transform=ax6.transAxes)
         
         plt.tight_layout()
         
@@ -344,6 +422,7 @@ Legend:
     def analyze_image(self, image_path: str):
         """Complete analysis workflow for a single image"""
         print(f"\nAnalyzing: {image_path}")
+        print(f"Preprocessing with {self.smoothing_level} smoothing...")
         
         # Load image
         image = self.load_image(image_path)
@@ -369,11 +448,13 @@ if __name__ == "__main__":
     
     print("Pattern Symmetry Analyzer")
     print("========================")
-    print("\nUsage: python pattern_symmetry_analyzer.py <image_file>")
-    print("Or use analyze_single.py for more options")
+    print("\nUsage: python pattern_symmetry_analyzer.py <image_file> [smoothing_level]")
+    print("Smoothing levels: light, medium (default), heavy")
+    print("\nOr use analyze_single.py for more options")
     
     if len(sys.argv) > 1:
-        analyzer = PatternSymmetryAnalyzer()
+        smoothing = sys.argv[2] if len(sys.argv) > 2 else 'medium'
+        analyzer = PatternSymmetryAnalyzer(smoothing_level=smoothing)
         analyzer.analyze_image(sys.argv[1])
     else:
         print("\nNo image file specified. Use:")
